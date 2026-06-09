@@ -1,0 +1,92 @@
+#include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
+#include <zephyr/dt-bindings/regulator/nrf5x.h>
+
+/ {
+    aliases {
+        led0 = &dice_led0;
+        led1 = &dice_led1;
+    };
+
+    dice_leds {
+        compatible = "gpio-leds";
+
+        dice_led0: dice_led0 {
+            gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+        };
+
+        dice_led1: dice_led1 {
+            gpios = <&gpio0 10 GPIO_ACTIVE_HIGH>;
+        };
+    };
+
+    bno085_ctrl {
+        compatible = "gpio-leds";
+
+        bno_rst: bno-rst {
+            gpios = <&gpio1 10 GPIO_ACTIVE_LOW>;
+            label = "BNO085 RST";
+        };
+
+        bno_wake: bno-wake {
+            gpios = <&gpio0 29 GPIO_ACTIVE_LOW>;
+            label = "BNO085 WAKE";
+        };
+    };
+
+    bno085_inputs {
+        compatible = "gpio-keys";
+
+        bno_int: bno-int {
+            gpios = <&gpio1 7 GPIO_ACTIVE_LOW>;
+            label = "BNO085 INT";
+        };
+    };
+};
+
+&pinctrl {
+    bno_spi2_default: bno_spi2_default {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 0, 23)>,
+                    <NRF_PSEL(SPIM_MOSI, 1, 14)>,
+                    <NRF_PSEL(SPIM_MISO, 1, 6)>;
+        };
+    };
+
+    bno_spi2_sleep: bno_spi2_sleep {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 0, 23)>,
+                    <NRF_PSEL(SPIM_MOSI, 1, 14)>,
+                    <NRF_PSEL(SPIM_MISO, 1, 6)>;
+            low-power-enable;
+        };
+    };
+};
+
+/* カスタムボード: DCDC インダクタ未実装のため LDO モードに変更 */
+&vregmain {
+    regulator-initial-mode = <NRF5X_REG_MODE_LDO>;
+};
+
+&vregradio {
+    regulator-initial-mode = <NRF5X_REG_MODE_LDO>;
+};
+
+&spi2 {
+    compatible = "nordic,nrf-spim";
+    status = "okay";
+
+    pinctrl-0 = <&bno_spi2_default>;
+    pinctrl-1 = <&bno_spi2_sleep>;
+    pinctrl-names = "default", "sleep";
+
+    cs-gpios = <&gpio1 13 GPIO_ACTIVE_LOW>;
+
+    #address-cells = <1>;
+    #size-cells = <0>;
+
+    bno085: bno085@0 {
+        compatible = "vnd,spi-device";
+        reg = <0>;
+        spi-max-frequency = <3000000>;
+    };
+};
