@@ -8,5 +8,6 @@ target_sources(app PRIVATE
     src/main.cpp
     src/bno085.cpp
     src/ble_orient.cpp
+    src/dice_fsm.cpp
 )
 target_link_libraries(app PUBLIC m)

@@ -21,13 +21,44 @@ static struct bt_uuid_128 svc_uuid    = BT_UUID_INIT_128(BT_UUID_DICE_SVC_VAL);
 static struct bt_uuid_128 orient_uuid = BT_UUID_INIT_128(BT_UUID_DICE_ORIENT_VAL);
 static struct bt_uuid_128 cmd_uuid    = BT_UUID_INIT_128(BT_UUID_DICE_CMD_VAL);
 
+/* ── packet types ───────────────────────────────────────────────────────── */
+
+static constexpr uint8_t PKT_STREAM = 0x01;
+static constexpr uint8_t PKT_IMPACT = 0x02;
+static constexpr uint8_t PKT_RESULT = 0x03;
+
 /* ── state ───────────────────────────────────────────────────────────────── */
 
 static const struct gpio_dt_spec led_conn = GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
 
 static struct bt_conn *active_conn = NULL;
 static bool            notify_en   = false;
-static float           orient[3];  /* yaw, pitch, roll */
+static uint8_t         last_pkt[58];
+static uint16_t        last_pkt_len = 0;
+
+/* ── little-endian pack helpers ─────────────────────────────────────────── */
+
+static inline void put_u32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+
+static inline void put_u16(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+}
+
+static inline void put_f32(uint8_t *p, float v)
+{
+    memcpy(p, &v, 4);
+}
+
+static inline void put_quat(uint8_t *p, const BNO085::Sample &s)
+{
+    put_f32(p + 0,  s.qx); put_f32(p + 4,  s.qy);
+    put_f32(p + 8,  s.qz); put_f32(p + 12, s.qw);
+}
 
 /* ── GATT callbacks ─────────────────────────────────────────────────────── */
 
@@ -35,7 +66,8 @@ static ssize_t on_orient_read(struct bt_conn *conn,
                                const struct bt_gatt_attr *attr,
                                void *buf, uint16_t len, uint16_t offset)
 {
-    return bt_gatt_attr_read(conn, attr, buf, len, offset, orient, sizeof(orient));
+    return bt_gatt_attr_read(conn, attr, buf, len, offset,
+                             last_pkt, last_pkt_len);
 }
 
 static void on_orient_ccc(const struct bt_gatt_attr *attr, uint16_t value)
@@ -68,6 +100,16 @@ BT_GATT_SERVICE_DEFINE(dice_svc,
                            NULL, on_cmd_write, NULL),
 );
 
+static void notify(const uint8_t *pkt, uint16_t len)
+{
+    memcpy(last_pkt, pkt, len < sizeof(last_pkt) ? len : sizeof(last_pkt));
+    last_pkt_len = len;
+
+    if (notify_en && active_conn) {
+        bt_gatt_notify(active_conn, &dice_svc.attrs[2], pkt, len);
+    }
+}
+
 /* ── BLE connection callbacks ───────────────────────────────────────────── */
 
 static const struct bt_data ad[] = {
@@ -82,6 +124,28 @@ static void on_connected(struct bt_conn *conn, uint8_t err)
     active_conn = bt_conn_ref(conn);
     gpio_pin_set_dt(&led_conn, 1);
     printf("BLE connected\n");
+
+    /* Web Bluetooth cannot set link parameters from the central side, so the
+     * peripheral must ask: 7.5–15 ms interval and 2M PHY for low latency.
+     * (BT_LE_CONN_PARAM / BT_CONN_LE_PHY_PARAM_* are C compound literals —
+     * not valid C++, hence the static structs.) */
+    static const struct bt_le_conn_param conn_params = {
+        .interval_min = 6,    /* 7.5 ms  */
+        .interval_max = 12,   /* 15 ms   */
+        .latency      = 0,
+        .timeout      = 400,  /* 4 s     */
+    };
+    static const struct bt_conn_le_phy_param phy_2m = {
+        .options     = BT_CONN_LE_PHY_OPT_NONE,
+        .pref_tx_phy = BT_GAP_LE_PHY_2M,
+        .pref_rx_phy = BT_GAP_LE_PHY_2M,
+    };
+
+    int rc = bt_conn_le_param_update(conn, &conn_params);
+    if (rc) printf("BLE param update req err=%d\n", rc);
+
+    rc = bt_conn_le_phy_update(conn, &phy_2m);
+    if (rc) printf("BLE PHY update req err=%d\n", rc);
 }
 
 static void on_disconnected(struct bt_conn *conn, uint8_t reason)
@@ -95,9 +159,18 @@ static void on_disconnected(struct bt_conn *conn, uint8_t reason)
     bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), NULL, 0);
 }
 
+static void on_param_updated(struct bt_conn *conn, uint16_t interval,
+                             uint16_t latency, uint16_t timeout)
+{
+    (void)conn;
+    printf("BLE params: interval=%.2fms latency=%u timeout=%ums\n",
+           interval * 1.25, latency, timeout * 10);
+}
+
 BT_CONN_CB_DEFINE(conn_cbs) = {
-    .connected    = on_connected,
-    .disconnected = on_disconnected,
+    .connected        = on_connected,
+    .disconnected     = on_disconnected,
+    .le_param_updated = on_param_updated,
 };
 
 /* ── namespace implementation ───────────────────────────────────────────── */
@@ -117,15 +190,48 @@ void init()
     printf("BLE advertising as \"%s\"\n", CONFIG_BT_DEVICE_NAME);
 }
 
-void sendOrient(float yaw, float pitch, float roll)
+void sendStream(const BNO085::Sample &s, DiceFsm::State state, const float v[3])
 {
-    orient[0] = yaw;
-    orient[1] = pitch;
-    orient[2] = roll;
+    uint8_t pkt[58];
+    pkt[0] = PKT_STREAM;
+    pkt[1] = (uint8_t)state;
+    put_u32(&pkt[2], (uint32_t)(s.t_us / 1000));
+    put_quat(&pkt[6], s);
+    put_f32(&pkt[22], s.wx); put_f32(&pkt[26], s.wy); put_f32(&pkt[30], s.wz);
+    put_f32(&pkt[34], s.ax); put_f32(&pkt[38], s.ay); put_f32(&pkt[42], s.az);
+    put_f32(&pkt[46], v[0]); put_f32(&pkt[50], v[1]); put_f32(&pkt[54], v[2]);
+    notify(pkt, sizeof(pkt));
+}
 
-    if (notify_en && active_conn) {
-        bt_gatt_notify(active_conn, &dice_svc.attrs[2], orient, sizeof(orient));
-    }
+void sendImpact(const DiceFsm::ImpactInfo &info)
+{
+    uint8_t pkt[50];
+    pkt[0] = PKT_IMPACT;
+    pkt[1] = 0;
+    put_u32(&pkt[2], info.t_ms);
+    put_quat(&pkt[6], info.pre);
+    put_f32(&pkt[22], info.pre.wx); put_f32(&pkt[26], info.pre.wy);
+    put_f32(&pkt[30], info.pre.wz);
+    put_f32(&pkt[34], info.vx); put_f32(&pkt[38], info.vy);
+    put_f32(&pkt[42], info.vz);
+    put_u16(&pkt[46], info.fall_ms);
+    pkt[48] = info.gyro_sat;
+    pkt[49] = info.acc_sat;
+    notify(pkt, sizeof(pkt));
+}
+
+void sendResult(const DiceFsm::ResultInfo &info)
+{
+    uint8_t pkt[32];
+    pkt[0] = PKT_RESULT;
+    pkt[1] = 0;
+    put_u32(&pkt[2], info.t_ms);
+    put_quat(&pkt[6], info.rest);
+    put_f32(&pkt[22], info.max_w);
+    put_f32(&pkt[26], info.max_a);
+    pkt[30] = info.gyro_sat;
+    pkt[31] = info.acc_sat;
+    notify(pkt, sizeof(pkt));
 }
 
 } // namespace BleOrient

@@ -50,7 +50,9 @@ bool BNO085::begin(const spi_dt_spec  *spi,
 
 bool BNO085::enableReport(uint8_t report_id, uint32_t interval_us)
 {
-    report_id_ = report_id;
+    if (num_reports_ < MAX_REPORTS) {
+        report_ids_[num_reports_++] = report_id;
+    }
 
     uint8_t cmd[17] = {};
     cmd[0] = CMD_SET_FEATURE;
@@ -60,34 +62,53 @@ bool BNO085::enableReport(uint8_t report_id, uint32_t interval_us)
     cmd[7] = (uint8_t)(interval_us >> 16);
     cmd[8] = (uint8_t)(interval_us >> 24);
 
-    /*
-     * skip=2: skip ch=0 and ch=2 reads; piggyback on ch=1 (reset complete).
-     * ch=1 is the first safe moment to issue commands per SH-2 spec.
-     */
-    queueWrite(CH_CONTROL, cmd, sizeof(cmd), 2);
-    drainBoot();
+    if (!booted_) {
+        /*
+         * skip=2: skip ch=0 advertisement and ch=2 unsolicited init;
+         * piggyback Set Feature on ch=1 (reset-complete) per SH-2 spec.
+         */
+        queueWrite(CH_CONTROL, cmd, sizeof(cmd), 2);
+        drainBoot();
+        booted_ = true;
+    } else {
+        /* Device is running: skip=0, piggyback on the next data packet. */
+        queueWrite(CH_CONTROL, cmd, sizeof(cmd), 0);
+        for (int i = 0; i < 8; i++) {
+            if (waitInt(300) != 0) break;
+            uint8_t ch, payload[BUF_SIZE];
+            size_t  plen;
+            readPacket(&ch, payload, sizeof(payload), &plen);
+            if (lw_len_ == 0) break;  /* write consumed */
+        }
+    }
     return true;
 }
 
-bool BNO085::poll(EulerAngles *out)
+bool BNO085::poll(Sample *out)
 {
-    /* Block here — CPU yields to other threads/BLE stack until INT fires */
-    if (k_sem_take(&data_sem_, K_FOREVER) != 0) return false;
+    /*
+     * Loop until a rotation-vector packet arrives.
+     * Gyro/accel packets update the internal cache but do not return.
+     * CPU yields to other threads while waiting for each INT.
+     */
+    while (true) {
+        if (k_sem_take(&data_sem_, K_FOREVER) != 0) return false;
 
-    uint8_t ch;
-    uint8_t payload[BUF_SIZE];
-    size_t  plen;
+        uint8_t ch;
+        uint8_t payload[BUF_SIZE];
+        size_t  plen;
 
-    if (readPacket(&ch, payload, sizeof(payload), &plen) != 0) return false;
+        if (readPacket(&ch, payload, sizeof(payload), &plen) != 0) continue;
 
-    if ((ch == CH_REPORTS || ch == CH_WAKE) && plen > 0) {
-        return parseReport(payload, plen, out);
+        if ((ch == CH_REPORTS || ch == CH_WAKE) && plen > 0) {
+            if (parseReport(payload, plen, out)) {
+                out->t_us = k_ticks_to_us_floor64(k_uptime_ticks());
+                return true;
+            }
+        } else if (ch == CH_CONTROL && plen > 0) {
+            printf("BNO085: ctrl id=0x%02x\n", payload[0]);
+        }
     }
-
-    if (ch == CH_CONTROL && plen > 0) {
-        printf("BNO085: ctrl id=0x%02x\n", payload[0]);
-    }
-    return false;
 }
 
 /* ── private ────────────────────────────────────────────────────────────── */
@@ -182,10 +203,10 @@ void BNO085::drainBoot()
     printf("BNO085: boot drain hit limit\n");
 }
 
-bool BNO085::parseReport(const uint8_t *p, size_t len, EulerAngles *out)
+bool BNO085::parseReport(const uint8_t *p, size_t len, Sample *out)
 {
-    bool   got = false;
-    size_t off = 0;
+    bool   got_rv = false;
+    size_t off    = 0;
 
     while (off < len) {
         uint8_t id = p[off];
@@ -196,37 +217,59 @@ bool BNO085::parseReport(const uint8_t *p, size_t len, EulerAngles *out)
             continue;
         }
 
-        if (id == report_id_) {
-            size_t needed = (report_id_ == REPORT_GAME_ROTATION_VECTOR) ? 12U : 14U;
+        if (id == REPORT_ROTATION_VECTOR || id == REPORT_GAME_ROTATION_VECTOR) {
+            size_t needed = (id == REPORT_GAME_ROTATION_VECTOR) ? 12U : 14U;
             if (off + needed > len) break;
-
-            float qx = (float)leI16(&p[off + 4])  / 16384.0f;
-            float qy = (float)leI16(&p[off + 6])  / 16384.0f;
-            float qz = (float)leI16(&p[off + 8])  / 16384.0f;
-            float qw = (float)leI16(&p[off + 10]) / 16384.0f;
-
-            quatToEuler(qx, qy, qz, qw, &out->yaw, &out->pitch, &out->roll);
-            out->accuracy = p[off + 2] & 0x03;
-            got = true;
+            cache_.qx       = (float)leI16(&p[off + 4])  / 16384.0f;
+            cache_.qy       = (float)leI16(&p[off + 6])  / 16384.0f;
+            cache_.qz       = (float)leI16(&p[off + 8])  / 16384.0f;
+            cache_.qw       = (float)leI16(&p[off + 10]) / 16384.0f;
+            cache_.accuracy = p[off + 2] & 0x03;
+            got_rv = true;
             off += needed;
+            continue;
+        }
+
+        if (id == REPORT_GYRO_CALIBRATED) {
+            /* Q9 = 1/512 rad/s per LSB */
+            if (off + 10 > len) break;
+            cache_.wx = (float)leI16(&p[off + 4]) / 512.0f;
+            cache_.wy = (float)leI16(&p[off + 6]) / 512.0f;
+            cache_.wz = (float)leI16(&p[off + 8]) / 512.0f;
+            off += 10;
+            continue;
+        }
+
+        if (id == REPORT_LINEAR_ACCEL) {
+            /* Q8 = 1/256 m/s² per LSB, gravity-removed */
+            if (off + 10 > len) break;
+            cache_.ax = (float)leI16(&p[off + 4]) / 256.0f;
+            cache_.ay = (float)leI16(&p[off + 6]) / 256.0f;
+            cache_.az = (float)leI16(&p[off + 8]) / 256.0f;
+            off += 10;
             continue;
         }
 
         printf("BNO085: unknown report 0x%02x\n", id);
         break;
     }
-    return got;
+
+    if (got_rv) {
+        *out = cache_;
+    }
+    return got_rv;
 }
 
-void BNO085::quatToEuler(float qx, float qy, float qz, float qw,
-                          float *yaw, float *pitch, float *roll)
+void BNO085::toEuler(const Sample &s, float *yaw, float *pitch, float *roll)
 {
+    float qx = s.qx, qy = s.qy, qz = s.qz, qw = s.qw;
+
     float sinr = 2.0f * (qw * qx + qy * qz);
     float cosr = 1.0f - 2.0f * (qx * qx + qy * qy);
     *roll = atan2f(sinr, cosr);
 
     float sinp = 2.0f * (qw * qy - qz * qx);
-    sinp = sinp > 1.0f ? 1.0f : (sinp < -1.0f ? -1.0f : sinp);
+    sinp  = sinp > 1.0f ? 1.0f : (sinp < -1.0f ? -1.0f : sinp);
     *pitch = asinf(sinp);
 
     float siny = 2.0f * (qw * qz + qx * qy);

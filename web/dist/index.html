@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dice Predictor</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+
+      body {
+        background: #0d0d1a;
+        color: #e8e4db;
+        font-family: 'SF Mono', 'Fira Code', monospace;
+        height: 100dvh;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      #app {
+        flex: 1;
+        position: relative;
+      }
+
+      #app canvas {
+        display: block;
+        width: 100% !important;
+        height: 100% !important;
+      }
+
+      /* ── prediction overlay ─────────────────────────────────────────── */
+      #prediction {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -60%);
+        text-align: center;
+        pointer-events: none;
+        transition: opacity 0.25s;
+        opacity: 0;
+      }
+
+      #prediction.visible { opacity: 1; }
+
+      #pred-face {
+        font-size: 7rem;
+        font-weight: 900;
+        line-height: 1;
+        text-shadow: 0 0 40px currentColor;
+        transition: color 0.3s;
+      }
+
+      #pred-face.uncertain { color: #e8a030; }
+      #pred-face.locked    { color: #40e080; animation: pop 0.25s ease-out; }
+      #pred-face.degraded  { color: #e05050; }
+
+      @keyframes pop {
+        0%   { transform: scale(0.7); }
+        60%  { transform: scale(1.12); }
+        100% { transform: scale(1); }
+      }
+
+      #pred-label {
+        font-size: 0.75rem;
+        letter-spacing: 0.06em;
+        margin-top: 0.3rem;
+        opacity: 0.65;
+      }
+
+      /* ── probability distribution bars ──────────────────────────────── */
+      #dist {
+        display: flex;
+        gap: 0.5rem;
+        justify-content: center;
+        margin-top: 0.8rem;
+        height: 46px;
+        align-items: flex-end;
+      }
+
+      .dist-col { width: 22px; text-align: center; }
+
+      .dist-bar {
+        width: 100%;
+        background: #e8a030;
+        border-radius: 2px 2px 0 0;
+        min-height: 1px;
+        transition: height 0.2s;
+      }
+
+      .dist-num { font-size: 0.6rem; opacity: 0.6; margin-top: 2px; }
+
+      /* ── top-left info ──────────────────────────────────────────────── */
+      #info {
+        position: absolute;
+        top: 0.8rem;
+        left: 1rem;
+        font-size: 0.7rem;
+        color: #4a6a8a;
+        line-height: 1.7;
+        pointer-events: none;
+      }
+
+      /* ── bottom HUD ─────────────────────────────────────────────────── */
+      #hud {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: flex-end;
+        padding: 1.5rem;
+        gap: 0.6rem;
+      }
+
+      #status {
+        font-size: 0.8rem;
+        color: #a09888;
+      }
+
+      #hud .row {
+        display: flex;
+        gap: 0.6rem;
+      }
+
+      button {
+        pointer-events: all;
+        background: #1e2a3a;
+        color: #93b4d0;
+        border: 1px solid #2d4260;
+        border-radius: 8px;
+        padding: 0.6rem 1.4rem;
+        font-family: inherit;
+        font-size: 0.85rem;
+        cursor: pointer;
+        transition: background 0.15s, border-color 0.15s;
+      }
+
+      button:hover:not(:disabled) {
+        background: #25364a;
+        border-color: #4a6fa0;
+      }
+
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+      button.small { padding: 0.35rem 0.7rem; font-size: 0.75rem; }
+
+      /* ── calibration panel ──────────────────────────────────────────── */
+      #calib-panel {
+        position: absolute;
+        right: 1rem;
+        top: 1rem;
+        background: #131325ee;
+        border: 1px solid #2d4260;
+        border-radius: 10px;
+        padding: 1rem;
+        display: none;
+        flex-direction: column;
+        gap: 0.5rem;
+        pointer-events: all;
+      }
+
+      #calib-panel.open { display: flex; }
+
+      #calib-panel p {
+        font-size: 0.7rem;
+        color: #a09888;
+        max-width: 200px;
+        line-height: 1.5;
+      }
+
+      #calib-faces {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 0.4rem;
+      }
+
+      #calib-faces button.done {
+        border-color: #40e080;
+        color: #40e080;
+      }
+    </style>
+    <script type="module" crossorigin src="/assets/index-Co1Yg2ca.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <!-- prediction overlay (center of canvas) -->
+      <div id="prediction">
+        <div id="pred-face" class="uncertain"></div>
+        <div id="pred-label"></div>
+        <div id="dist"></div>
+      </div>
+
+      <!-- top-left telemetry -->
+      <div id="info">
+        <div id="state"></div>
+        <div id="omega"></div>
+        <div id="stats"></div>
+      </div>
+
+      <!-- calibration panel -->
+      <div id="calib-panel">
+        <p>その面を上にして静置し、番号を押すと登録されます。6面登録でキャリブレーション完了。</p>
+        <div id="calib-faces"></div>
+        <button class="small" id="calib-reset">リセット</button>
+      </div>
+
+      <!-- bottom HUD -->
+      <div id="hud">
+        <div id="status">未接続</div>
+        <div class="row">
+          <button id="connect-btn">🎲 サイコロを接続</button>
+          <button id="calib-btn" class="small">面校正</button>
+          <button id="export-btn" class="small">記録DL</button>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

@@ -4,3 +4,6 @@
 
 # build
 /build*/
+
+web/node_modules
+.claude
