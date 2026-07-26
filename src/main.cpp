@@ -26,9 +26,9 @@ static const struct gpio_dt_spec led0     = GPIO_DT_SPEC_GET(DT_ALIAS(led0),    
 /* 2500 µs = 400 Hz target; the chip clamps to what it can actually deliver. */
 static constexpr uint32_t REPORT_INTERVAL_US = 2500;
 
-/* Stream every Nth sample over BLE (~100 Hz at 400 Hz sensor rate).
+/* Stream every Nth sample over BLE (~50 Hz at 400 Hz sensor rate).
  * Impact/result packets are never decimated. */
-static constexpr int STREAM_DECIMATION = 4;
+static constexpr int STREAM_DECIMATION = 8;
 
 /* ── globals ─────────────────────────────────────────────────────────────── */
 
@@ -76,31 +76,45 @@ int main()
 
     BNO085::Sample s;
     int n = 0;
+    bool previous_simulation_mode = false;
 
     while (true) {
         if (!imu.poll(&s)) continue;
 
-        const DiceFsm::Event ev = fsm.update(s);
+        const bool simulation_mode = BleOrient::simulationEnabled();
+        if (simulation_mode != previous_simulation_mode) {
+            fsm = DiceFsm();
+            n = 0;
+            previous_simulation_mode = simulation_mode;
+        }
 
-        if (ev == DiceFsm::Event::IMPACT) {
-            const auto &i = fsm.impact();
-            BleOrient::sendImpact(i);
-            printf("IMPACT fall=%ums v=(%.2f %.2f %.2f) w=(%.1f %.1f %.1f) sat=%u/%u\n",
-                   i.fall_ms, (double)i.vx, (double)i.vy, (double)i.vz,
-                   (double)i.pre.wx, (double)i.pre.wy, (double)i.pre.wz,
-                   i.gyro_sat, i.acc_sat);
-        } else if (ev == DiceFsm::Event::RESULT) {
-            const auto &r = fsm.result();
-            BleOrient::sendResult(r);
-            printf("RESULT max|w|=%.1f max|a|=%.1f sat=%u/%u\n",
-                   (double)r.max_w, (double)r.max_a, r.gyro_sat, r.acc_sat);
+        if (simulation_mode) {
+            const DiceFsm::Event ev = fsm.update(s);
+
+            if (ev == DiceFsm::Event::IMPACT) {
+                const auto &i = fsm.impact();
+                BleOrient::sendImpact(i);
+                printf("IMPACT fall=%ums v=(%.2f %.2f %.2f) w=(%.1f %.1f %.1f) sat=%u/%u\n",
+                       i.fall_ms, (double)i.vx, (double)i.vy, (double)i.vz,
+                       (double)i.pre.wx, (double)i.pre.wy, (double)i.pre.wz,
+                       i.gyro_sat, i.acc_sat);
+            } else if (ev == DiceFsm::Event::RESULT) {
+                const auto &r = fsm.result();
+                BleOrient::sendResult(r);
+                printf("RESULT max|w|=%.1f max|a|=%.1f sat=%u/%u\n",
+                       (double)r.max_w, (double)r.max_a, r.gyro_sat, r.acc_sat);
+            }
         }
 
         if (++n >= STREAM_DECIMATION) {
             n = 0;
-            float v[3];
-            fsm.velocity(v);
-            BleOrient::sendStream(s, fsm.state(), v);
+            if (simulation_mode) {
+                float v[3];
+                fsm.velocity(v);
+                BleOrient::sendStream(s, fsm.state(), v);
+            } else {
+                BleOrient::sendPose(s);
+            }
         }
     }
 }

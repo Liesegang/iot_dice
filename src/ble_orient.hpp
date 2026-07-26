@@ -7,6 +7,12 @@
  * BLE notify protocol — single characteristic, first byte = packet type.
  * All multi-byte fields little-endian.
  *
+ * 0x01 POSE (22 B, normal mode) — orientation only, approximately 50 Hz
+ *   [0]      type
+ *   [1]      state = REST
+ *   [2..5]   t_ms      u32  uptime
+ *   [6..21]  qx qy qz qw    f32×4
+ *
  * 0x01 STREAM (58 B) — decimated live stream for visualization/recording
  *   [0]      type
  *   [1]      fsm state (DiceFsm::State)
@@ -43,6 +49,8 @@ namespace BleOrient {
 
 void init();
 
+bool simulationEnabled();
+void sendPose(const BNO085::Sample &s);
 void sendStream(const BNO085::Sample &s, DiceFsm::State state, const float v[3]);
 void sendImpact(const DiceFsm::ImpactInfo &info);
 void sendResult(const DiceFsm::ResultInfo &info);

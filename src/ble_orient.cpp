@@ -5,6 +5,7 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/sys/atomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -33,6 +34,7 @@ static const struct gpio_dt_spec led_conn = GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpi
 
 static struct bt_conn *active_conn = NULL;
 static bool            notify_en   = false;
+static atomic_t        simulation_en = ATOMIC_INIT(0);
 static uint8_t         last_pkt[58];
 static uint16_t        last_pkt_len = 0;
 
@@ -82,8 +84,18 @@ static ssize_t on_cmd_write(struct bt_conn *conn,
                              const void *buf, uint16_t len,
                              uint16_t offset, uint8_t flags)
 {
-    (void)conn; (void)attr; (void)offset; (void)flags;
-    printf("BLE cmd len=%u\n", len);
+    (void)conn; (void)attr; (void)flags;
+    if (offset != 0 || len != 1) {
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+    }
+
+    const uint8_t command = *(const uint8_t *)buf;
+    if (command > 1) {
+        return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+    }
+
+    atomic_set(&simulation_en, command);
+    printf("BLE mode: %s\n", command ? "simulation" : "pose");
     return len;
 }
 
@@ -155,6 +167,7 @@ static void on_disconnected(struct bt_conn *conn, uint8_t reason)
     bt_conn_unref(active_conn);
     active_conn = NULL;
     notify_en   = false;
+    atomic_set(&simulation_en, 0);
     gpio_pin_set_dt(&led_conn, 0);
     bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), NULL, 0);
 }
@@ -188,6 +201,21 @@ void init()
     if (err) { printf("BLE adv err=%d\n", err); return; }
 
     printf("BLE advertising as \"%s\"\n", CONFIG_BT_DEVICE_NAME);
+}
+
+bool simulationEnabled()
+{
+    return atomic_get(&simulation_en) != 0;
+}
+
+void sendPose(const BNO085::Sample &s)
+{
+    uint8_t pkt[22];
+    pkt[0] = PKT_STREAM;
+    pkt[1] = (uint8_t)DiceFsm::State::REST;
+    put_u32(&pkt[2], (uint32_t)(s.t_us / 1000));
+    put_quat(&pkt[6], s);
+    notify(pkt, sizeof(pkt));
 }
 
 void sendStream(const BNO085::Sample &s, DiceFsm::State state, const float v[3])

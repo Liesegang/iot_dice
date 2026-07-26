@@ -8,6 +8,7 @@ import { ThrowStore } from './record';
 
 const container  = document.getElementById('app')!;
 const btnConnect = document.getElementById('connect-btn') as HTMLButtonElement;
+const btnSimulation = document.getElementById('simulation-btn') as HTMLButtonElement;
 const btnCalib   = document.getElementById('calib-btn') as HTMLButtonElement;
 const btnExport  = document.getElementById('export-btn') as HTMLButtonElement;
 const elStatus   = document.getElementById('status')!;
@@ -30,7 +31,6 @@ const faceMap   = new FaceMap();
 const predictor = new DicePredictor();
 const store     = new ThrowStore();
 
-predictor.init().then(() => console.info('[rapier] ready'));
 store.open().then(() => refreshStats());
 
 /* ── per-throw working state ────────────────────────────────────────────── */
@@ -40,6 +40,8 @@ let streamBuf: StreamSample[] = [];
 let latest: StreamSample | null = null;
 let pendingImpact: ImpactPacket | null = null;
 let pendingPrediction: Prediction | null = null;
+let simulationEnabled = false;
+let predictorReady = false;
 
 const STATE_LABEL: Record<string, string> = {
     rest: '静止', moving: '移動', freefall: '落下', tumbling: '転がり',
@@ -107,9 +109,11 @@ ble.onSample = (s) => {
     latest = s;
     scene.setQuaternion(s.q.x, s.q.y, s.q.z, s.q.w);
 
-    streamBuf.push(s);
-    const cutoff = s.t - STREAM_BUF_MS;
-    while (streamBuf.length > 1 && streamBuf[0].t < cutoff) streamBuf.shift();
+    if (simulationEnabled) {
+        streamBuf.push(s);
+        const cutoff = s.t - STREAM_BUF_MS;
+        while (streamBuf.length > 1 && streamBuf[0].t < cutoff) streamBuf.shift();
+    }
 
     const omega = Math.hypot(s.w.x, s.w.y, s.w.z);
     elOmega.textContent = omega > 0.1 ? `ω ${omega.toFixed(2)} rad/s` : '';
@@ -119,6 +123,7 @@ ble.onSample = (s) => {
 /* ── impact → run Monte Carlo prediction ────────────────────────────────── */
 
 ble.onImpact = (impact) => {
+    if (!simulationEnabled || !predictorReady) return;
     pendingImpact = impact;
     pendingPrediction = predictor.predict(impact, faceMap);
     if (pendingPrediction) {
@@ -135,6 +140,7 @@ ble.onImpact = (impact) => {
 /* ── result → label, score, record ──────────────────────────────────────── */
 
 ble.onResult = async (result) => {
+    if (!simulationEnabled) return;
     const actual = faceMap.faceFromQuat(result.q);
 
     let hit: boolean | null = null;
@@ -186,10 +192,36 @@ btnConnect.addEventListener('click', async () => {
     elStatus.textContent = 'スキャン中...';
     try {
         await ble.connect();
+        await ble.setSimulationEnabled(simulationEnabled);
+        elStatus.textContent = simulationEnabled
+            ? '接続中（シミュレーション）'
+            : '接続中（姿勢のみ・50 Hz）';
     } catch (e) {
         elStatus.textContent = `エラー: ${(e as Error).message}`;
         btnConnect.disabled  = false;
     }
+});
+
+btnSimulation.addEventListener('click', async () => {
+    simulationEnabled = !simulationEnabled;
+    btnSimulation.textContent =
+        `シミュレーション ${simulationEnabled ? 'ON' : 'OFF'}`;
+    btnSimulation.classList.toggle('done', simulationEnabled);
+
+    if (simulationEnabled && !predictorReady) {
+        elStatus.textContent = 'シミュレーションを準備中...';
+        await predictor.init();
+        predictorReady = true;
+    }
+
+    streamBuf = [];
+    pendingImpact = null;
+    pendingPrediction = null;
+    elPred.classList.remove('visible');
+    await ble.setSimulationEnabled(simulationEnabled);
+    elStatus.textContent = ble.connected
+        ? (simulationEnabled ? '接続中（シミュレーション）' : '接続中（姿勢のみ・50 Hz）')
+        : (simulationEnabled ? '未接続（シミュレーション）' : '未接続');
 });
 
 /* ── face calibration UI ────────────────────────────────────────────────── */

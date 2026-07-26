@@ -1,13 +1,15 @@
 /* BLE notify protocol — single characteristic, first byte = packet type.
  * Mirrors src/ble_orient.hpp on the firmware side. All little-endian.
  *
- *  0x01 STREAM (58 B): state u8, t_ms u32, q f32×4, ω f32×3, a f32×3, v f32×3
+ *  0x01 POSE   (22 B): state u8, t_ms u32, q f32×4
+ *  0x01 STREAM (58 B, simulation mode): POSE + ω f32×3, a f32×3, v f32×3
  *  0x02 IMPACT (50 B): pre-impact q/ω/v + fall_ms u16 + sat counters
  *  0x03 RESULT (32 B): rest q + max|ω| + max|a| + sat counters
  */
 
 const SERVICE_UUID     = 'd1ce0001-1234-5678-abcd-1234567890ab';
 const ORIENT_CHAR_UUID = 'd1ce0002-1234-5678-abcd-1234567890ab';
+const CMD_CHAR_UUID    = 'd1ce0003-1234-5678-abcd-1234567890ab';
 
 export const FSM_STATES = ['rest', 'moving', 'freefall', 'tumbling'] as const;
 export type FsmState = typeof FSM_STATES[number];
@@ -63,6 +65,7 @@ function vec3At(dv: DataView, off: number): Vec3 {
 export class DiceBle {
     private device: BluetoothDevice | null = null;
     private char: BluetoothRemoteGATTCharacteristic | null = null;
+    private cmdChar: BluetoothRemoteGATTCharacteristic | null = null;
 
     onSample: ((s: StreamSample) => void) | null = null;
     onImpact: ((p: ImpactPacket) => void) | null = null;
@@ -83,17 +86,24 @@ export class DiceBle {
             this.onStatusChange?.('切断されました');
             this.device = null;
             this.char   = null;
+            this.cmdChar = null;
         });
 
         const server  = await this.device.gatt!.connect();
         const service = await server.getPrimaryService(SERVICE_UUID);
         this.char     = await service.getCharacteristic(ORIENT_CHAR_UUID);
+        this.cmdChar  = await service.getCharacteristic(CMD_CHAR_UUID);
 
         await this.char.startNotifications();
         this.char.addEventListener('characteristicvaluechanged',
             (e: Event) => this.onValueChanged(e));
 
         this.onStatusChange?.(`接続: ${this.device.name}`);
+    }
+
+    async setSimulationEnabled(enabled: boolean): Promise<void> {
+        if (!this.cmdChar) return;
+        await this.cmdChar.writeValueWithoutResponse(Uint8Array.of(enabled ? 1 : 0));
     }
 
     disconnect(): void {
@@ -107,14 +117,17 @@ export class DiceBle {
         switch (dv.getUint8(0)) {
 
         case 0x01: {
-            if (dv.byteLength < 58) return;
+            if (dv.byteLength < 22) return;
+            const hasSimulationData = dv.byteLength >= 58;
             this.onSample?.({
-                state: FSM_STATES[dv.getUint8(1)] ?? 'rest',
+                state: hasSimulationData
+                    ? (FSM_STATES[dv.getUint8(1)] ?? 'rest')
+                    : 'rest',
                 t: dv.getUint32(2, true),
                 q: quatAt(dv, 6),
-                w: vec3At(dv, 22),
-                a: vec3At(dv, 34),
-                v: vec3At(dv, 46),
+                w: hasSimulationData ? vec3At(dv, 22) : { x: 0, y: 0, z: 0 },
+                a: hasSimulationData ? vec3At(dv, 34) : { x: 0, y: 0, z: 0 },
+                v: hasSimulationData ? vec3At(dv, 46) : { x: 0, y: 0, z: 0 },
             });
             break;
         }
