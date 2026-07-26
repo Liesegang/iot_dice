@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "web/**"
+      - "software/**"
       - ".github/workflows/deploy-pages.yml"
   workflow_dispatch:
 
@@ -29,14 +29,14 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: software/package-lock.json
 
       - name: Install dependencies
-        working-directory: web
+        working-directory: software
         run: npm ci
 
       - name: Build
-        working-directory: web
+        working-directory: software
         run: npm run build
 
       - name: Configure GitHub Pages
@@ -45,7 +45,7 @@ jobs:
       - name: Upload site
         uses: actions/upload-pages-artifact@v4
         with:
-          path: web/dist
+          path: software/dist
 
   deploy:
     environment:

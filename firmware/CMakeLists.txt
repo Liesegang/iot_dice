@@ -2,7 +2,7 @@
 
 cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
-project(dice-test2)
+project(iot-dice)
 
 target_sources(app PRIVATE
     src/main.cpp

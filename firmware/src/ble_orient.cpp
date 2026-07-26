@@ -169,7 +169,7 @@ static void on_disconnected(struct bt_conn *conn, uint8_t reason)
     notify_en   = false;
     atomic_set(&simulation_en, 0);
     gpio_pin_set_dt(&led_conn, 0);
-    bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), NULL, 0);
+    bt_le_adv_start(BT_LE_ADV_CONN_FAST_2, ad, ARRAY_SIZE(ad), NULL, 0);
 }
 
 static void on_param_updated(struct bt_conn *conn, uint16_t interval,
@@ -197,7 +197,7 @@ void init()
     int err = bt_enable(NULL);
     if (err) { printf("BLE enable err=%d\n", err); return; }
 
-    err = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), NULL, 0);
+    err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_2, ad, ARRAY_SIZE(ad), NULL, 0);
     if (err) { printf("BLE adv err=%d\n", err); return; }
 
     printf("BLE advertising as \"%s\"\n", CONFIG_BT_DEVICE_NAME);
