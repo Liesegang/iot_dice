@@ -73,41 +73,94 @@ export class DiceBle {
     onStatusChange: ((status: string) => void) | null = null;
 
     get connected(): boolean {
-        return this.device?.gatt?.connected ?? false;
+        return this.ready && (this.device?.gatt?.connected ?? false);
+    }
+
+    get connecting(): boolean {
+        return this.connecting_;
+    }
+
+    private connecting_ = false;
+    private ready = false;
+    private disconnectListener: (() => void) | null = null;
+    private valueListener = (e: Event) => this.onValueChanged(e);
+
+    private async step<T>(label: string, operation: Promise<T>): Promise<T> {
+        this.onStatusChange?.(label);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+            return await Promise.race([
+                operation,
+                new Promise<never>((_, reject) => {
+                    timer = setTimeout(() => reject(new Error(`${label} タイムアウト`)), 15000);
+                }),
+            ]);
+        } finally {
+            clearTimeout(timer);
+        }
     }
 
     async connect(): Promise<void> {
-        this.device = await navigator.bluetooth.requestDevice({
-            filters: [{ name: 'dice' }],
-            optionalServices: [SERVICE_UUID],
-        });
+        if (this.connecting || this.connected) return;
+        this.connecting_ = true;
+        try {
+            this.onStatusChange?.('デバイスを選択してください');
+            this.device = await navigator.bluetooth.requestDevice({
+                filters: [{ name: 'dice' }],
+                optionalServices: [SERVICE_UUID],
+            });
+            this.disconnectListener = () => {
+                this.clearConnection();
+                this.onStatusChange?.('切断されました');
+            };
+            this.device.addEventListener('gattserverdisconnected', this.disconnectListener);
 
-        this.device.addEventListener('gattserverdisconnected', () => {
-            this.onStatusChange?.('切断されました');
-            this.device = null;
-            this.char   = null;
-            this.cmdChar = null;
-        });
+            const server = await this.step('BLE接続中...', this.device.gatt!.connect());
+            const service = await this.step('サービス確認中...',
+                server.getPrimaryService(SERVICE_UUID));
+            this.char = await this.step('姿勢サービス確認中...',
+                service.getCharacteristic(ORIENT_CHAR_UUID));
+            this.cmdChar = await this.step('操作サービス確認中...',
+                service.getCharacteristic(CMD_CHAR_UUID));
 
-        const server  = await this.device.gatt!.connect();
-        const service = await server.getPrimaryService(SERVICE_UUID);
-        this.char     = await service.getCharacteristic(ORIENT_CHAR_UUID);
-        this.cmdChar  = await service.getCharacteristic(CMD_CHAR_UUID);
-
-        await this.char.startNotifications();
-        this.char.addEventListener('characteristicvaluechanged',
-            (e: Event) => this.onValueChanged(e));
-
-        this.onStatusChange?.(`接続: ${this.device.name}`);
+            // Register before enabling notifications so the first sample is not lost.
+            this.char.addEventListener('characteristicvaluechanged', this.valueListener);
+            await this.step('姿勢通知を有効化中...', this.char.startNotifications());
+            if (!this.device?.gatt?.connected) throw new Error('接続中に切断されました');
+            this.ready = true;
+        } catch (error) {
+            this.disconnect();
+            throw error;
+        } finally {
+            this.connecting_ = false;
+        }
+        this.onStatusChange?.('接続済み：姿勢データ待ち');
     }
 
     async setSimulationEnabled(enabled: boolean): Promise<void> {
         if (!this.cmdChar) return;
-        await this.cmdChar.writeValueWithoutResponse(Uint8Array.of(enabled ? 1 : 0));
+        await this.step('動作モード設定中...',
+            this.cmdChar.writeValueWithoutResponse(Uint8Array.of(enabled ? 1 : 0)));
+    }
+
+    private clearConnection(): void {
+        if (this.disconnectListener) {
+            this.device?.removeEventListener('gattserverdisconnected', this.disconnectListener);
+        }
+        this.char?.removeEventListener('characteristicvaluechanged', this.valueListener);
+        this.device = null;
+        this.char = null;
+        this.cmdChar = null;
+        this.disconnectListener = null;
+        this.ready = false;
     }
 
     disconnect(): void {
-        this.device?.gatt?.disconnect();
+        const device = this.device;
+        this.clearConnection();
+        // Also cancels a pending GATT connection after a timeout.
+        device?.gatt?.disconnect();
+        this.onStatusChange?.('切断されました');
     }
 
     private onValueChanged(event: Event): void {

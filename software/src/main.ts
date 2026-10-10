@@ -42,6 +42,11 @@ let pendingImpact: ImpactPacket | null = null;
 let pendingPrediction: Prediction | null = null;
 let simulationEnabled = false;
 let predictorReady = false;
+let connectedAt = 0;
+let lastSampleAt = 0;
+let sampleCount = 0;
+let rateStartedAt = performance.now();
+let sampleRate = 0;
 
 const STATE_LABEL: Record<string, string> = {
     rest: '静止', moving: '移動', freefall: '落下', tumbling: '転がり',
@@ -106,6 +111,8 @@ function showActual(face: number, hit: boolean | null): void {
 /* ── BLE → scene / buffers ──────────────────────────────────────────────── */
 
 ble.onSample = (s) => {
+    lastSampleAt = performance.now();
+    sampleCount++;
     latest = s;
     scene.setQuaternion(s.q.x, s.q.y, s.q.z, s.q.w);
 
@@ -180,8 +187,41 @@ ble.onResult = async (result) => {
 ble.onStatusChange = (status) => {
     elStatus.textContent   = status;
     btnConnect.textContent = ble.connected ? '切断' : '🎲 サイコロを接続';
-    btnConnect.disabled    = false;
+    btnConnect.disabled    = ble.connecting;
+    if (!ble.connected) {
+        latest = null;
+        lastSampleAt = 0;
+        sampleCount = 0;
+        sampleRate = 0;
+        elState.textContent = '';
+        elOmega.textContent = '';
+    }
 };
+
+function showConnectionStatus(): void {
+    if (!ble.connected || ble.connecting) return;
+    const now = performance.now();
+    if (now - (lastSampleAt || connectedAt) > 3000) {
+        elStatus.textContent = lastSampleAt
+            ? '接続済み：姿勢データが途絶えました（センサーを確認）'
+            : '接続済み：姿勢データ未受信（センサーを確認）';
+        elState.textContent = '';
+        elOmega.textContent = '';
+    } else if (lastSampleAt) {
+        const mode = simulationEnabled ? 'シミュレーション' : '姿勢のみ';
+        elStatus.textContent = `姿勢受信中（${mode}・${sampleRate} Hz）`;
+    } else {
+        elStatus.textContent = '接続済み：姿勢データ待ち';
+    }
+}
+
+setInterval(() => {
+    const now = performance.now();
+    sampleRate = Math.round(sampleCount * 1000 / (now - rateStartedAt));
+    sampleCount = 0;
+    rateStartedAt = now;
+    showConnectionStatus();
+}, 1000);
 
 btnConnect.addEventListener('click', async () => {
     if (ble.connected) {
@@ -192,11 +232,12 @@ btnConnect.addEventListener('click', async () => {
     elStatus.textContent = 'スキャン中...';
     try {
         await ble.connect();
+        connectedAt = performance.now();
+        rateStartedAt = connectedAt;
         await ble.setSimulationEnabled(simulationEnabled);
-        elStatus.textContent = simulationEnabled
-            ? '接続中（シミュレーション）'
-            : '接続中（姿勢のみ・50 Hz）';
+        showConnectionStatus();
     } catch (e) {
+        ble.disconnect();
         elStatus.textContent = `エラー: ${(e as Error).message}`;
         btnConnect.disabled  = false;
     }
@@ -218,10 +259,14 @@ btnSimulation.addEventListener('click', async () => {
     pendingImpact = null;
     pendingPrediction = null;
     elPred.classList.remove('visible');
-    await ble.setSimulationEnabled(simulationEnabled);
-    elStatus.textContent = ble.connected
-        ? (simulationEnabled ? '接続中（シミュレーション）' : '接続中（姿勢のみ・50 Hz）')
-        : (simulationEnabled ? '未接続（シミュレーション）' : '未接続');
+    try {
+        await ble.setSimulationEnabled(simulationEnabled);
+        if (ble.connected) showConnectionStatus();
+        else elStatus.textContent = simulationEnabled ? '未接続（シミュレーション）' : '未接続';
+    } catch (e) {
+        ble.disconnect();
+        elStatus.textContent = `エラー: ${(e as Error).message}`;
+    }
 });
 
 /* ── face calibration UI ────────────────────────────────────────────────── */

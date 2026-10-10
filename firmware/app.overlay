@@ -62,6 +62,12 @@
     };
 };
 
+/* ISP2053 has external LFXO load capacitors (module datasheet section 2.6). */
+&lfxo {
+    load-capacitors = "external";
+    /delete-property/ load-capacitance-picofarad;
+};
+
 /* カスタムボード: DCDC インダクタ未実装のため LDO モードに変更 */
 &vregmain {
     regulator-initial-mode = <NRF5X_REG_MODE_LDO>;

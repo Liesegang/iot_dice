@@ -53,7 +53,7 @@ private:
     int  waitInt(int timeout_ms);
     int  readPacket(uint8_t *ch, uint8_t *payload, size_t cap, size_t *len);
     void queueWrite(uint8_t ch, const uint8_t *data, size_t len, int skip = 0);
-    void drainBoot();
+    bool drainBoot();
     bool parseReport(const uint8_t *payload, size_t len, Sample *out);
     static int16_t leI16(const uint8_t *p);
 

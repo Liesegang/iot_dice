@@ -40,7 +40,7 @@ bool BNO085::begin(const spi_dt_spec  *spi,
     k_msleep(20);
     gpio_pin_set_dt(rst_, 0);
 
-    /* Wait for first INT via semaphore (ISR fires on falling edge) */
+    /* Wait for readiness without consuming the pending boot packet. */
     if (waitInt(1000) != 0) {
         printf("BNO085: no INT after reset\n");
         return false;
@@ -68,18 +68,22 @@ bool BNO085::enableReport(uint8_t report_id, uint32_t interval_us)
          * piggyback Set Feature on ch=1 (reset-complete) per SH-2 spec.
          */
         queueWrite(CH_CONTROL, cmd, sizeof(cmd), 2);
-        drainBoot();
+        if (!drainBoot()) return false;
         booted_ = true;
     } else {
         /* Device is running: skip=0, piggyback on the next data packet. */
         queueWrite(CH_CONTROL, cmd, sizeof(cmd), 0);
         for (int i = 0; i < 8; i++) {
             if (waitInt(300) != 0) break;
-            uint8_t ch, payload[BUF_SIZE];
-            size_t  plen;
+            uint8_t ch = 0, payload[BUF_SIZE];
+            size_t  plen = 0;
             readPacket(&ch, payload, sizeof(payload), &plen);
             if (lw_len_ == 0) break;  /* write consumed */
         }
+    }
+    if (lw_len_ != 0) {
+        printf("BNO085: report 0x%02x was not sent\n", report_id);
+        return false;
     }
     return true;
 }
@@ -91,8 +95,10 @@ bool BNO085::poll(Sample *out)
      * Gyro/accel packets update the internal cache but do not return.
      * CPU yields to other threads while waiting for each INT.
      */
+    const int64_t deadline = k_uptime_get() + 1000;
     while (true) {
-        if (k_sem_take(&data_sem_, K_FOREVER) != 0) return false;
+        const int64_t remaining = deadline - k_uptime_get();
+        if (remaining <= 0 || waitInt((int)remaining) != 0) return false;
 
         uint8_t ch;
         uint8_t payload[BUF_SIZE];
@@ -124,27 +130,37 @@ void BNO085::intIsr(const struct device *port,
 
 int BNO085::waitInt(int timeout_ms)
 {
-    if (k_sem_take(&data_sem_, K_MSEC(timeout_ms)) == 0) return 0;
-    return -ETIMEDOUT;
+    const int64_t deadline = k_uptime_get() + timeout_ms;
+    while (true) {
+        /* H_INTN is a level indicating readiness, not a queue of packets.
+         * In particular, begin() must not consume the first boot interrupt
+         * and leave drainBoot() waiting for an edge that already happened.
+         * BNO085 can also withdraw/retry an interrupt after about 10 ms. */
+        const int ready = gpio_pin_get_dt(intn_);
+        if (ready < 0) return ready;
+        if (ready) return 0;
+
+        const int64_t remaining = deadline - k_uptime_get();
+        if (remaining <= 0) return -ETIMEDOUT;
+        k_sem_take(&data_sem_, K_MSEC(remaining));
+    }
 }
 
 int BNO085::readPacket(uint8_t *ch, uint8_t *payload, size_t cap, size_t *len)
 {
+    *ch = 0;
+    *len = 0;
     memset(txbuf_, 0x00, sizeof(txbuf_));
 
-    if (lw_len_ > 0 && lw_len_ + 4U <= sizeof(txbuf_)) {
-        if (lw_skip_ > 0) {
-            --lw_skip_;
-        } else {
-            uint16_t wlen = (uint16_t)(lw_len_ + 4U);
-            txbuf_[0] = (uint8_t)(wlen & 0xFF);
-            txbuf_[1] = (uint8_t)((wlen >> 8) & 0x7F);
-            txbuf_[2] = lw_ch_;
-            txbuf_[3] = seq_[lw_ch_]++;
-            memcpy(&txbuf_[4], lw_buf_, lw_len_);
-            printf("BNO085: piggyback ch=%u cmd=0x%02x\n", lw_ch_, lw_buf_[0]);
-            lw_len_ = 0;
-        }
+    const bool writing = lw_len_ > 0 && lw_skip_ == 0 &&
+                         lw_len_ + 4U <= sizeof(txbuf_);
+    if (writing) {
+        uint16_t wlen = (uint16_t)(lw_len_ + 4U);
+        txbuf_[0] = (uint8_t)(wlen & 0xFF);
+        txbuf_[1] = (uint8_t)((wlen >> 8) & 0x7F);
+        txbuf_[2] = lw_ch_;
+        txbuf_[3] = seq_[lw_ch_];
+        memcpy(&txbuf_[4], lw_buf_, lw_len_);
     }
 
     memset(rxbuf_, 0x00, sizeof(rxbuf_));
@@ -163,6 +179,15 @@ int BNO085::readPacket(uint8_t *ch, uint8_t *payload, size_t cap, size_t *len)
     if (pkt_len < 4 || pkt_len > (uint16_t)BUF_SIZE) {
         printf("BNO085: bad SHTP len=%u\n", pkt_len);
         return -EIO;
+    }
+
+    /* Invalid/idle reads must not consume boot packets or pending commands. */
+    if (writing) {
+        ++seq_[lw_ch_];
+        printf("BNO085: piggyback ch=%u cmd=0x%02x\n", lw_ch_, lw_buf_[0]);
+        lw_len_ = 0;
+    } else if (lw_len_ > 0 && lw_skip_ > 0) {
+        --lw_skip_;
     }
 
     *ch  = rxbuf_[2];
@@ -185,22 +210,28 @@ void BNO085::queueWrite(uint8_t ch, const uint8_t *data, size_t len, int skip)
     memcpy(lw_buf_, data, len);
 }
 
-void BNO085::drainBoot()
+bool BNO085::drainBoot()
 {
     uint8_t payload[BUF_SIZE];
-    uint8_t ch;
-    size_t  plen;
+    uint8_t ch = 0;
+    size_t  plen = 0;
 
     for (int i = 0; i < 16; i++) {
         if (waitInt(500) != 0) {
             printf("BNO085: boot drain done (%d pkts)\n", i);
-            return;
+            return lw_len_ == 0;
         }
         int ret = readPacket(&ch, payload, sizeof(payload), &plen);
+        if (ret != 0) {
+            printf("BNO085: boot[%d] read failed (%d), header=%02x %02x %02x %02x\n",
+                   i, ret, rxbuf_[0], rxbuf_[1], rxbuf_[2], rxbuf_[3]);
+            continue;
+        }
         printf("BNO085: boot[%d] ch=%u len=%u id=0x%02x\n",
-               i, ch, (unsigned)plen, ret == 0 && plen ? payload[0] : 0);
+               i, ch, (unsigned)plen, plen ? payload[0] : 0);
     }
     printf("BNO085: boot drain hit limit\n");
+    return lw_len_ == 0;
 }
 
 bool BNO085::parseReport(const uint8_t *p, size_t len, Sample *out)
