@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.20.0)
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+project(iot_dice_v2)
+target_sources(app PRIVATE src/main.cpp src/lsm6dsv320x.cpp src/ble_orient.cpp src/dice_fsm.cpp)
+target_link_libraries(app PUBLIC m)

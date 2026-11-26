@@ -1,0 +1,3 @@
+[submodule "v1/firmware/Adafruit_BNO08x"]
+	path = v1/firmware/Adafruit_BNO08x
+	url = https://github.com/adafruit/Adafruit_BNO08x.git

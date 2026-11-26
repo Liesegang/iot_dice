@@ -1,0 +1,8 @@
+mainmenu "IoT Dice v2"
+source "Kconfig.zephyr"
+
+config DICE_IMU
+    bool
+    default y
+    select HAS_STMEMSC
+    select USE_STDC_LSM6DSV320X

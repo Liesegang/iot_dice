@@ -2,7 +2,8 @@
 *.swp
 *~
 
-software/node_modules
-firmware/build*/
+**/software/node_modules/
+v2/software/dist/
+**/firmware/build*/
 .claude
 .agents

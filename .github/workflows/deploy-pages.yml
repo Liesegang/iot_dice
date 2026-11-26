@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
     paths:
-      - "software/**"
+      - "v1/software/**"
+      - "v2/software/**"
       - ".github/workflows/deploy-pages.yml"
   workflow_dispatch:
 
@@ -29,15 +30,32 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: software/package-lock.json
+          cache-dependency-path: |
+            v1/software/package-lock.json
+            v2/software/package-lock.json
 
-      - name: Install dependencies
-        working-directory: software
+      - name: Install v1 dependencies
+        working-directory: v1/software
         run: npm ci
 
-      - name: Build
-        working-directory: software
+      - name: Build v1
+        working-directory: v1/software
         run: npm run build
+
+      - name: Install v2 dependencies
+        working-directory: v2/software
+        run: npm ci
+
+      - name: Build v2
+        working-directory: v2/software
+        run: npm run build
+
+      - name: Assemble versioned site
+        run: |
+          mkdir -p site/v1 site/v2
+          cp -R v2/software/dist/. site/
+          cp -R v1/software/dist/. site/v1/
+          cp -R v2/software/dist/. site/v2/
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
@@ -45,7 +63,7 @@ jobs:
       - name: Upload site
         uses: actions/upload-pages-artifact@v4
         with:
-          path: software/dist
+          path: site
 
   deploy:
     environment:

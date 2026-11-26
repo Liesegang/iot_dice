@@ -1,0 +1,40 @@
+#include <zephyr/dt-bindings/regulator/nrf5x.h>
+
+/* Dice 2a / KAGA FEI ES4L15BA1. The module pad numbers are not GPIO numbers. */
+&led0 { gpios = <&gpio1 1 GPIO_ACTIVE_HIGH>; label = "LED1: BLE connected"; };
+&led1 { gpios = <&gpio1 0 GPIO_ACTIVE_HIGH>; label = "LED2: power heartbeat"; };
+&led2 { status = "disabled"; };
+&led3 { status = "disabled"; };
+
+/* P1.00 and P1.01 are LEDs, so the LF clock must use RC. */
+&lfxo {
+    status = "disabled";
+    load-capacitors = "external";
+    /delete-property/ load-capacitance-femtofarad;
+};
+&vregmain { regulator-initial-mode = <NRF5X_REG_MODE_LDO>; };
+&uart20 { status = "disabled"; };
+&uart30 { status = "disabled"; };
+&spi00 { status = "disabled"; };
+&pwm20 { status = "disabled"; };
+&nfct { status = "disabled"; };
+
+/ {
+    /* P0 data + P2 clock cannot share a hardware SPIM instance on nRF54L15.
+     * GPIO SPI keeps the existing board wiring usable without trace cuts. */
+    imu_bus: spi-gpio {
+        compatible = "zephyr,spi-bitbang";
+        status = "okay";
+        #address-cells = <1>;
+        #size-cells = <0>;
+        clk-gpios = <&gpio2 4 GPIO_ACTIVE_HIGH>;
+        mosi-gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+        miso-gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
+        cs-gpios = <&gpio2 1 GPIO_ACTIVE_LOW>;
+        imu: imu@0 {
+            compatible = "vnd,spi-device";
+            reg = <0>;
+            spi-max-frequency = <500000>;
+        };
+    };
+};
